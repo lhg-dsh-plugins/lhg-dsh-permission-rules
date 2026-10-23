@@ -1,0 +1,201 @@
+/**
+ * Config resolution tests: defaults, numeric validation, the searchUp
+ * constraints, and the bad-file/policy vocabulary.
+ * @module dsh-permission-rules/test/config.spec
+ */
+
+import { describe, expect, it } from 'vitest'
+import { Config, resolveConfig } from '../src/config.ts'
+
+describe('resolveConfig', () => {
+  it('fills every default (case-insensitivity follows the platform)', () => {
+    const resolved = resolveConfig()
+    expect(resolved).toMatchObject({
+      rulesFile: '.dsh/rules.yaml',
+      fallbackPath: undefined,
+      badFilePolicy: 'fail',
+      maxRules: 256,
+      maxCachedWorkspaces: 512,
+      patternMode: 'glob',
+      watch: true,
+      watchStabilityThresholdMs: 200,
+      language: 'en',
+      audit: 'all',
+      searchUp: false,
+      maxGlobStars: 2,
+      enforce: true,
+      allowUnmarkedAudit: false,
+    })
+    expect(resolved.caseInsensitivePaths).toBe(process.platform === 'win32')
+  })
+
+  it('preserves explicit values', () => {
+    const resolved = resolveConfig({
+      rulesFile: '.rules.yml',
+      fallbackPath: '/etc/rules.yaml',
+      badFilePolicy: 'ignore-with-warning',
+      maxRules: 16,
+      maxCachedWorkspaces: 64,
+      patternMode: 'regex',
+      watch: false,
+      watchStabilityThresholdMs: 50,
+      language: 'zh',
+      caseInsensitivePaths: true,
+      audit: 'hits',
+      searchUp: true,
+      maxGlobStars: 1,
+      enforce: false,
+      allowUnmarkedAudit: true,
+    })
+    expect(resolved.rulesFile).toBe('.rules.yml')
+    expect(resolved.fallbackPath).toBe('/etc/rules.yaml')
+    expect(resolved.badFilePolicy).toBe('ignore-with-warning')
+    expect(resolved.maxRules).toBe(16)
+    expect(resolved.maxCachedWorkspaces).toBe(64)
+    expect(resolved.patternMode).toBe('regex')
+    expect(resolved.watch).toBe(false)
+    expect(resolved.watchStabilityThresholdMs).toBe(50)
+    expect(resolved.language).toBe('zh')
+    expect(resolved.caseInsensitivePaths).toBe(true)
+    expect(resolved.audit).toBe('hits')
+    expect(resolved.searchUp).toBe(true)
+    expect(resolved.maxGlobStars).toBe(1)
+    expect(resolved.enforce).toBe(false)
+    expect(resolved.allowUnmarkedAudit).toBe(true)
+  })
+
+  it('fails loud on non-positive or non-integer maxRules', () => {
+    expect(() => resolveConfig({ maxRules: 0 })).toThrow(/maxRules/)
+    expect(() => resolveConfig({ maxRules: 1.5 })).toThrow(/maxRules/)
+    expect(() => resolveConfig({ maxRules: Number.NaN })).toThrow(/maxRules/)
+  })
+
+  it('fails loud on invalid maxCachedWorkspaces', () => {
+    expect(() => resolveConfig({ maxCachedWorkspaces: 0 })).toThrow(/maxCachedWorkspaces/)
+    expect(() => resolveConfig({ maxCachedWorkspaces: 2.5 })).toThrow(/maxCachedWorkspaces/)
+  })
+
+  it('fails loud on invalid maxGlobStars', () => {
+    expect(() => resolveConfig({ maxGlobStars: 0 })).toThrow(/maxGlobStars/)
+    expect(() => resolveConfig({ maxGlobStars: -1 })).toThrow(/maxGlobStars/)
+    expect(() => resolveConfig({ maxGlobStars: 1.5 })).toThrow(/maxGlobStars/)
+  })
+
+  it('fails loud on searchUp combined with an absolute rulesFile', () => {
+    // POSIX absolute paths are absolute on every platform.
+    expect(() => resolveConfig({ searchUp: true, rulesFile: '/etc/rules.yaml' })).toThrow(/searchUp cannot be combined with an absolute rulesFile/)
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a Windows drive path on Windows hosts', () => {
+    expect(() => resolveConfig({ searchUp: true, rulesFile: 'C:\\global\\rules.yaml' })).toThrow(/searchUp/)
+  })
+
+  it('fails loud on negative stability windows', () => {
+    expect(() => resolveConfig({ watchStabilityThresholdMs: -1 })).toThrow(/watchStabilityThresholdMs/)
+  })
+
+  it('fails loud on values outside the closed enums (plain-JS mounts)', () => {
+    expect(() => resolveConfig({ badFilePolicy: 'warn' as never })).toThrow(/badFilePolicy/)
+    expect(() => resolveConfig({ patternMode: 're' as never })).toThrow(/patternMode/)
+    expect(() => resolveConfig({ language: 'fr' as never })).toThrow(/language/)
+    expect(() => resolveConfig({ audit: 'none' as never })).toThrow(/audit/)
+  })
+
+  it('fails loud on non-boolean flags (plain-JS mounts)', () => {
+    expect(() => resolveConfig({ watch: 'yes' as never })).toThrow(/watch/)
+    expect(() => resolveConfig({ searchUp: 1 as never })).toThrow(/searchUp/)
+    expect(() => resolveConfig({ enforce: 'no' as never })).toThrow(/enforce/)
+    expect(() => resolveConfig({ caseInsensitivePaths: 0 as never })).toThrow(/caseInsensitivePaths/)
+    expect(() => resolveConfig({ allowUnmarkedAudit: 'yes' as never })).toThrow(/allowUnmarkedAudit/)
+  })
+
+  it('defaults the built-in baseline on with the shipped path', () => {
+    const resolved = resolveConfig()
+    expect(resolved.builtin.enabled).toBe(true)
+    expect(resolved.builtin.path).toContain('builtin-high-risk.yaml')
+  })
+
+  it('resolves an explicit builtin path and honors the enable switch', () => {
+    const resolved = resolveConfig({ builtin: { enabled: false, path: '/etc/custom-rules.yaml' } })
+    expect(resolved.builtin.enabled).toBe(false)
+    expect(resolved.builtin.path).toBe('/etc/custom-rules.yaml')
+    expect(() => resolveConfig({ builtin: { enabled: 'yes' as never } })).toThrow(/builtin.enabled/)
+  })
+})
+
+describe('network.upstreamProxy (issue #19 item 2)', () => {
+  it('defaults to off and accepts inherit or an explicit http(s) proxy URL', () => {
+    expect(resolveConfig().network.upstreamProxy).toBe('off')
+    expect(resolveConfig({ network: { upstreamProxy: 'inherit' } }).network.upstreamProxy).toBe('inherit')
+    const withUserinfo = 'http://user:pw@proxy.example:3128'
+    expect(resolveConfig({ network: { upstreamProxy: withUserinfo } }).network.upstreamProxy).toBe(withUserinfo)
+    expect(resolveConfig({ network: { upstreamProxy: 'https://proxy.example:3129' } }).network.upstreamProxy).toBe('https://proxy.example:3129')
+  })
+
+  it('rejects SOCKS, non-http(s), blank and unparseable values loudly', () => {
+    for (const value of ['socks5://127.0.0.1:1080', 'socks://127.0.0.1:1080', 'ftp://proxy.example', 'proxy.example:3128', 'not a url', '', '   ']) {
+      expect(() => resolveConfig({ network: { upstreamProxy: value } })).toThrow(/upstreamProxy/)
+    }
+    expect(() => resolveConfig({ network: { upstreamProxy: 42 as never } })).toThrow(/upstreamProxy/)
+  })
+})
+
+describe('network.allowHostAction (issue #19 item 3)', () => {
+  it('defaults to true and preserves an explicit value', () => {
+    expect(resolveConfig().network.allowHostAction).toBe(true)
+    expect(resolveConfig({ network: {} }).network.allowHostAction).toBe(true)
+    expect(resolveConfig({ network: { allowHostAction: false } }).network.allowHostAction).toBe(false)
+    expect(resolveConfig({ network: { allowHostAction: true } }).network.allowHostAction).toBe(true)
+  })
+
+  it('fails loud on a non-boolean (plain-JS mounts)', () => {
+    expect(() => resolveConfig({ network: { allowHostAction: 'yes' as never } })).toThrow(/network.allowHostAction/)
+    expect(() => resolveConfig({ network: { allowHostAction: 0 as never } })).toThrow(/network.allowHostAction/)
+  })
+
+  it('carries the same default in the Schemastery schema the loader uses', () => {
+    // A mount through the settings/loader path must agree with a plain-JS mount.
+    // Since the `0.1.7-alpha` contract the schema output is LIVE, so the field
+    // is read through its reference.
+    const viaSchema = Config({ network: {} })
+    expect(viaSchema.network.get()?.allowHostAction).toBe(true)
+    const off = Config({ network: { allowHostAction: false } })
+    expect(off.network.get()?.allowHostAction).toBe(false)
+  })
+})
+
+describe('the schema refuses out-of-range values on the write path', () => {
+  // The removed `settings.register(..., { validate })` callback re-ran
+  // resolveConfig before persistence. Its replacement is the schema's own
+  // bounds: the config editor resolves the merged config against THIS schema
+  // before it writes, so these must throw here, not only in resolveConfig.
+  it('rejects every numeric bound the resolver enforces', () => {
+    expect(() => Config({ maxRules: 0 })).toThrow()
+    expect(() => Config({ maxRules: 1.5 })).toThrow()
+    expect(() => Config({ maxCachedWorkspaces: 0 })).toThrow()
+    expect(() => Config({ maxGlobStars: 0 })).toThrow()
+    expect(() => Config({ watchStabilityThresholdMs: -1 })).toThrow()
+    expect(() => Config({ network: { proxyPort: 99999 } })).toThrow()
+    expect(() => Config({ network: { proxyPort: -1 } })).toThrow()
+    expect(() => Config({ network: { proxyMaxRecent: 0 } })).toThrow()
+  })
+
+  it('rejects a value outside a closed enum', () => {
+    expect(() => Config({ badFilePolicy: 'warn' as never })).toThrow()
+    expect(() => Config({ language: 'fr' as never })).toThrow()
+    expect(() => Config({ network: { mode: 'nope' as never } })).toThrow()
+  })
+
+  it('accepts the boundary and the in-range values it must', () => {
+    expect(() => Config({ maxRules: 1, maxGlobStars: 1, watchStabilityThresholdMs: 0 })).not.toThrow()
+    expect(() => Config({ network: { proxyPort: 65535 } })).not.toThrow()
+    expect(() => Config({ network: { proxyPort: 0, mode: 'allow-all' } })).not.toThrow()
+  })
+
+  it('keeps the cross-field searchUp rule out of the schema, so the resolver still owns it', () => {
+    // Schemastery 3.18.3 has no `.check()`, so this one rule cannot be
+    // expressed on the schema and stays a resolveConfig-time failure.
+    expect(() => Config({ searchUp: true, rulesFile: '/etc/rules.yaml' })).not.toThrow()
+    expect(() => resolveConfig({ searchUp: true, rulesFile: '/etc/rules.yaml' })).toThrow(/searchUp/)
+  })
+})
